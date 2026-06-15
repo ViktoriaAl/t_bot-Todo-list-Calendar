@@ -28,7 +28,7 @@ from telegram.warnings import PTBUserWarning
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
-TOKEN = 'X'
+TOKEN = '8436152259:AAGgYgp1emDODTian1Bbrj8pXMTKyi73Oig'
 
 calendar_dict = {}
 tasks_dict = {}
@@ -50,12 +50,12 @@ WAITING_FOR_CONFIRMATION = 15
 def save_data():
     data = []
 
-    data_dict = tasks_dict | calendar_dict
-    for username in data_dict.keys():
+    data_dict = set(tasks_dict | calendar_dict)
+    for username in data_dict:
         data.append({
             'user_name': username,
-            'todo_list_info': tasks_dict[username],
-            'calendar_info': calendar_dict[username]
+            'todo_list_info': tasks_dict.get(username, {}),
+            'calendar_info': calendar_dict.get(username, {})
         })
     
     df = pd.DataFrame(data)
@@ -64,46 +64,76 @@ def save_data():
 
     df.to_csv('bot_data.csv', index=False, encoding='utf-8')
 
+expected_columns = ['user_name', 'todo_list_info', 'calendar_info']
 
 def load_data():
     if not os.path.exists('bot_data.csv'):
-        return pd.DataFrame(columns=['user_name', 'todo_list_info', 'calendar_info'])
+        return pd.DataFrame(columns=expected_columns)
     
     df = pd.read_csv('bot_data.csv')
+
+    if df.empty:
+        return pd.DataFrame(columns=expected_columns)
+
+    for col in ['user_name', 'todo_list_info', 'calendar_info']:
+        if col not in df.columns:
+            df[col] = None
 
     df['todo_list_info'] = df['todo_list_info'].apply(lambda x: json.loads(x) if pd.notna(x) else [])
     df['calendar_info'] = df['calendar_info'].apply(lambda x: json.loads(x) if pd.notna(x) else [])
 
+    df = df.reindex(columns=expected_columns)
+
     return df
 
 df = load_data()
+print(df.columns)
+print(df.head())
 
 
 def with_user(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwards):
-        global tasks_dict
-        global calendar_dict
-        global df
-        if update and update.effective_user:
-            
-            user = update.effective_user
-            if not(df['user_name'].isin([user.username]).any()):
-                new_df = pd.DataFrame({'user_name': user.username, 'todo_list_info': [{}], 'calendar_info': [{}]})
+        global tasks_dict, calendar_dict, df
 
-                context.user_data['user_name'] = user.username
-                context.user_data['user_id'] = user.id
-                df = pd.concat([df, new_df], ignore_index=True)
-            else:
-                context.user_data['user_name'] = user.username
-                context.user_data['user_id'] = user.id
-
-                tasks_dict[user.username] = df.loc[df['user_name'] == user.username, 'todo_list_info'].iloc[0]
-                calendar_dict[user.username] = df.loc[df['user_name'] == user.username, 'calendar_info'].iloc[0]
-        else:
+        if not update or not update.effective_user:
             context.user_data['user_id'] = None
+            return await func(update, context, *args, **kwards)
+        
+        user = update.effective_user
+        context.user_data['user_name'] = user.username
+        context.user_data['user_id'] = user.id
+
+        if user.username in df['user_name'].values:
+            row = df[df['user_name'] == user.username].iloc[0]
+
+            tasks_dict[user.username] = json.loads(row['todo_list_info'] or "{}")
+            calendar_dict[user.username] = json.loads(row['calendar_info'] or "{}")
+
         return await func(update, context, *args, **kwards)
     return wrapper
+
+
+    #     if update and update.effective_user:
+    #         context.user_data['user_id'] = None
+    #         user = update.effective_user
+    #         if not(df['user_name'].isin([user.username]).any()):
+    #             new_df = pd.DataFrame({'user_name': user.username, 'todo_list_info': [{}], 'calendar_info': [{}]})
+
+    #             context.user_data['user_name'] = user.username
+    #             context.user_data['user_id'] = user.id
+    #             # df = pd.concat([df, new_df], ignore_index=True)
+
+    #         else:
+    #             context.user_data['user_name'] = user.username
+    #             context.user_data['user_id'] = user.id
+
+    #             tasks_dict[user.username] = df.loc[df['user_name'] == user.username, 'todo_list_info'].iloc[0]
+    #             calendar_dict[user.username] = df.loc[df['user_name'] == user.username, 'calendar_info'].iloc[0]
+    #     else:
+    #         context.user_data['user_id'] = None
+    #     return await func(update, context, *args, **kwards)
+    # return wrapper
 
 
 ## _________Keyboards 
@@ -347,9 +377,10 @@ async def process_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_name = context.user_data['user_name']
 
         if normalized_date in tasks_dict[user_name]:
+            tasks_text = '\n'.join(tasks_dict[user_name][normalized_date])
             await update.message.reply_text(
                 f"отлично! отмечаем выполнеными дела на <b>{normalized_date}</b>\n\n"
-                f"вот список дел:\n\n{'\n'.join(tasks_dict[user_name][normalized_date])}\n\n"
+                f"вот список дел:\n\n{tasks_text}\n\n"
                 "теперь напишите список/номера дел, которые надо отметить выполнеными.\n  ⇝ список дел/номера дел напишите через запятую\n\nотмена диалога: /cancel", 
                 parse_mode='HTML'        
             )
@@ -407,8 +438,17 @@ async def process_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     todo_command = context.user_data.get('todo_command')
 
     user_name = context.user_data['user_name']
+    print(user_name)
+    print(tasks_dict)
+    print(tasks_dict.keys())
 
-    if date in tasks_dict[user_name]:
+    if user_name not in tasks_dict.keys():
+        if todo_command == 'create_tasks':
+            tasks_text_list = [str(i + 1) + '. ' + tasks_text_list[i] for i in range(len(tasks_text_list))]
+            tasks_dict[user_name] = {}
+            tasks_dict[user_name][date] = tasks_text_list
+    
+    elif user_name in tasks_dict.keys() and date in tasks_dict[user_name]:
         if todo_command == 'create_tasks':
             last_number = find_number(tasks_dict[user_name][date][-1]) + 1
             for i in range(len(tasks_text_list)):
@@ -418,7 +458,7 @@ async def process_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif todo_command == 'done_tasks':
             tasks_dict[user_name][date] = tasks_done(tasks_text_list, tasks_dict[user_name][date])
-    elif date not in tasks_dict and todo_command == 'create_tasks':
+    elif date not in tasks_dict[user_name] and todo_command == 'create_tasks':
         tasks_text_list = [str(i + 1) + '. ' + tasks_text_list[i] for i in range(len(tasks_text_list))]
         tasks_dict[user_name][date] = tasks_text_list
 
@@ -658,7 +698,7 @@ def show_share_calendar(user_date, mode, share_mode, all_info):
                 date_obj = datetime.now().date()
                 user_date = date_obj.strftime('%d.%m')
             else:
-                date_obj = datetime.now().date() + 1
+                date_obj = datetime.now().date() + timedelta(days=1)
                 user_date = date_obj.strftime('%d.%m')
 
 
@@ -920,28 +960,31 @@ async def process_date_calendar(update: Update, context: ContextTypes.DEFAULT_TY
             share_mode = None
 
         user_name = context.user_data['user_name']
-        photo_name, representation = show_share_calendar(user_date, open_or_share, share_mode, calendar_dict[user_name])
-
-        if representation == 'day':
-            if user_date in ['сегодня', 'завтра']:
-                if user_date == 'сегодня':
-                    date_obj = datetime.now().date()
-                    show_text = date_obj.strftime('%d.%m')
-                else:
-                    date_obj = datetime.now().date() + 1
-                    show_text = date_obj.strftime('%d.%m')
-        elif representation == 'month':
-            if user_date in [str(i) for i in range(1, 13)]:
-                show_text = month_name[int(user_date) - 1]
-            else:
-                show_text = user_date
+        if user_name not in calendar_dict:
+            await update.message.reply_text("Ваш календарь пока пуст", parse_mode=ParseMode.HTML)
         else:
-            show_text = month_name[-1]
+            photo_name, representation = show_share_calendar(user_date, open_or_share, share_mode, calendar_dict[user_name])
 
-        await update.message.reply_photo(
-            photo=open(photo_name, 'rb'), 
-            caption=f"календарь на {show_text}"
-        )
+            if representation == 'day':
+                if user_date in ['сегодня', 'завтра']:
+                    if user_date == 'сегодня':
+                        date_obj = datetime.now().date()
+                        show_text = date_obj.strftime('%d.%m')
+                    else:
+                        date_obj = datetime.now().date() + 1
+                        show_text = date_obj.strftime('%d.%m')
+            elif representation == 'month':
+                if user_date in [str(i) for i in range(1, 13)]:
+                    show_text = month_name[int(user_date) - 1]
+                else:
+                    show_text = user_date
+            else:
+                show_text = month_name[-1]
+
+            await update.message.reply_photo(
+                photo=open(photo_name, 'rb'), 
+                caption=f"календарь на {show_text}"
+            )
     elif calendar_command == 'slot':
         user_date = update.message.text.strip().lower()
         normalized_date = validate_and_parse_date(user_date)
@@ -1019,7 +1062,11 @@ async def tasks_reliability_processing(update: Update, context: ContextTypes.DEF
         tasks = context.user_data.get('tasks_list')
 
         user_name = context.user_data['user_name']
-        if date in calendar_dict[user_name]:
+
+        if user_name not in calendar_dict.keys():
+            calendar_dict[user_name] = {}
+            calendar_dict[user_name][date] = tasks
+        elif date in calendar_dict[user_name]:
             calendar_dict[user_name][date].append(tasks)
             calendar_dict[user_name][date] = sorted(calendar_dict[user_name][date], key=select_time)
         else:
